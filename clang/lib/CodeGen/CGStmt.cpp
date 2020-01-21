@@ -1198,7 +1198,7 @@ void CodeGenFunction::EmitParallelForallStmt(const ForallStmt &S,
   for (llvm::User *U : LoopVal->users()) {
     llvm::LoadInst *LI = dyn_cast<llvm::LoadInst>(U);
     if (LI && LI->getParent() == ForBody) {
-      llvm::errs() << "found a matching load in ForBody:\n" << *LI;
+      // llvm::errs() << "found a matching load in ForBody:\n" << *LI << "\n";
       LI->setOperand(0, RInst);
     }
   }
