@@ -3183,6 +3183,7 @@ public:
   LValue EmitCilkSpawnExprLValue(const CilkSpawnExpr *E);
 
   void EmitDetachBlock(const DeclStmt *DS, llvm::ValueMap<llvm::Value*, llvm::AllocaInst *> &VM);
+  void EmitMirror(const DeclStmt *DS, llvm::ValueMap<llvm::Value*, llvm::AllocaInst *> &VM);
   void ReplaceAllUsesInCurrentBlock(llvm::ValueMap<llvm::Value*, llvm::AllocaInst *> &VM);
 
   void EmitSpawnStmt(const SpawnStmt &S);

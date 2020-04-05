@@ -16,6 +16,7 @@
 #include "CGCleanup.h"
 #include "clang/AST/StmtTapir.h"
 #include "llvm/IR/ValueMap.h"
+#include "llvm/IR/Value.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -239,6 +240,10 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   // Extract a convenience block
   llvm::BasicBlock *ConditionBlock = Condition.getBlock();
 
+  // get the current insert block (e.g. 'entry'), this will be the basic block
+  // where the induction variable is allocated/defined
+  llvm::BasicBlock *EntryBlock = Builder.GetInsertBlock();
+
   const SourceRange &R = S.getSourceRange();
   LexicalScope ForScope(*this, S.getSourceRange());
 
@@ -295,14 +300,14 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   // Emit the detach block
   EmitDetachBlock(DS, InductionDetachMap);
 
-
   // create the detach terminator
-  Builder.CreateDetach(ForBody, Increment, SRStart);
+  llvm::Instruction *DetachInstruction = Builder.CreateDetach(ForBody, Increment, SRStart);
 
-  /////////////////////////////////
-  // Finished the detach block
-  /////////////////////////////////
+  //////////////////////////////////////////////////////////////////
+  // Partially completed the detach block, now start the body block
+  //////////////////////////////////////////////////////////////////
   
+  // Emit the body block
   EmitBlock(ForBody);
 
   incrementProfileCounter(&S);
@@ -310,9 +315,33 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   {
     // Create a separate cleanup scope for the loop variable and body.
     LexicalScope BodyScope(*this, R);
+    // put the induction variable in the local var map
     EmitStmt(S.getLoopVarStmt());
     EmitStmt(S.getBody());
   }
+
+  //////////////////////////////////////////////////////////////////
+  // Finish the detach block
+  // Do this here because we need the induction variable in the local map
+  // which only happens after emitting the forall body
+  //////////////////////////////////////////////////////////////////
+  
+  // get the current insert point, so we can return to it later
+  llvm::BasicBlock *CurrentBlock=Builder.GetInsertBlock();
+
+  // we want to insert before the detach terminator
+  Builder.SetInsertPoint(DetachInstruction);
+
+  // Emit the induction variable mirror
+  DS = cast<DeclStmt>(S.getLoopVarStmt());
+  EmitMirror(DS, InductionDetachMap);
+
+  // DWS This is a hack to test the induction variable hypothesis
+  Builder.SetInsertPoint(ForBody);
+  ReplaceAllUsesInCurrentBlock(InductionDetachMap);
+
+  // reset the insert block
+  Builder.SetInsertPoint(CurrentBlock);
 
   /////////////////////////////////////////////////////////////////
   // Modify the body block to use the detach block variable mirror.
@@ -422,3 +451,32 @@ void CodeGenFunction::EmitDetachBlock(const DeclStmt *DS, llvm::ValueMap<llvm::V
   }
 
 }
+
+void CodeGenFunction::EmitMirror(const DeclStmt *DS, llvm::ValueMap<llvm::Value*, llvm::AllocaInst *> &InductionDetachMap){
+
+  // iterate over all VarDecl's in the DeclStmt
+  for (auto *DI : DS->decls()){
+
+    // convert the Decl iterator into a VarDecl
+    const VarDecl *InductionVarDecl=dyn_cast<VarDecl>(DI);
+
+    // Get the induction variable (e.g. %i)
+    llvm::Value *InductionVar = GetAddrOfLocalVar(InductionVarDecl).getPointer();
+
+    // Codegen a local copy in the detach block of the induction variable and 
+    // store the induction variable value
+
+    // Get the Clang QualType for the Induction Variable
+    QualType RefType = InductionVarDecl->getType();
+
+    // Use the LLVM Builder to create the detach variable alloca
+    // e.g. %i.detach = alloca i32
+    // At the moment, I don't know how to force an alignment into the alloca
+    llvm::AllocaInst *DetachVar = Builder.CreateAlloca(
+        getTypes().ConvertType(RefType), nullptr, InductionVar->getName() + ".detach");
+
+    // Add the mapping from induction variable to detach variable
+    InductionDetachMap[InductionVar]=DetachVar;         
+  }
+}
+
