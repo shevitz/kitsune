@@ -16,6 +16,7 @@
 #include "CGCleanup.h"
 #include "clang/AST/StmtTapir.h"
 #include "llvm/IR/ValueMap.h"
+#include "llvm/IR/CFG.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -86,6 +87,10 @@ void CodeGenFunction::EmitSpawnStmt(const SpawnStmt &S) {
 void CodeGenFunction::EmitForallStmt(const ForallStmt &S,
                                              ArrayRef<const Attr *> ForAttrs) {
 
+  clang::LangOptions LO=getLangOpts();
+  LO.CXXExceptions=0;
+  LO.Exceptions=0;
+ 
   assert(S.getInit() && "forall loop has no init");
   assert(S.getCond() && "forall loop has no condition");
   assert(S.getInc() && "forall loop has no increment");
@@ -230,10 +235,17 @@ void CodeGenFunction::EmitForallStmt(const ForallStmt &S,
 
   EmitBlock(End, true);
 
+  LO.CXXExceptions=1;
+  LO.Exceptions=1;
+ 
 }
 
 void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
                                              ArrayRef<const Attr *> ForAttrs) {
+  clang::LangOptions LO=getLangOpts();
+  LO.CXXExceptions=0;
+  LO.Exceptions=0;
+ 
   // Create all jump destinations and blocks in the order they appear in the IR
   // some are jump destinations, some are basic blocks
   JumpDest Condition = getJumpDestInCurrentScope("forall.cond");
@@ -283,10 +295,13 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
       BoolCondVal, Detach, Sync.getBlock(),
       createProfileWeightsForLoop(S.getCond(), getProfileCount(S.getBody())));
 
-  if (ForScope.requiresCleanups()) {
-    EmitBlock(Cleanup.getBlock());
-    EmitBranchThroughCleanup(Sync);
-  }
+  // I have a working conjecture that this is only for cleaning up from exceptions 
+  // which we disabled anyway. This seems to only be a problem with the Cilk backend
+  // so I will only disable in that case
+//  if (!getLangOpts().Cilk && ForScope.requiresCleanups()) {
+//    EmitBlock(Cleanup.getBlock());
+//    EmitBranchThroughCleanup(Sync);
+//  }
 
   /////////////////////////////////
   // Create the detach block
@@ -294,10 +309,6 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
 
   // Emit the (currently empty) detach block
   EmitBlock(Detach);
-  auto OldAllocaInsertPt = AllocaInsertPt; 
-  llvm::Value *Undef = llvm::UndefValue::get(Int32Ty);
-  AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "",
-                                             Detach);
 
   // Extract the DeclStmt from the statement init
   const DeclStmt *DS = cast<DeclStmt>(S.getBeginStmt());
@@ -308,7 +319,11 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   // Emit the detach block
   EmitDetachBlock(DS, InductionDetachMap);
 
-
+  // Set the alloca insert point to just after the induction variable mirror
+  auto OldAllocaInsertPt = AllocaInsertPt; 
+  llvm::Value *Undef = llvm::UndefValue::get(Int32Ty);
+  AllocaInsertPt = new llvm::BitCastInst(Undef, Int32Ty, "", Detach);
+  
   // create the detach terminator
   Builder.CreateDetach(ForBody, Increment, SRStart);
 
@@ -324,9 +339,11 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
     // Create a separate cleanup scope for the loop variable and body.
     LexicalScope BodyScope(*this, R);
     EmitStmt(S.getLoopVarStmt());
+    ReplaceAllUsesInCurrentBlock(InductionDetachMap);
+
     EmitStmt(S.getBody());
   }
-
+ 
   /////////////////////////////////////////////////////////////////
   // Modify the body block to use the detach block variable mirror.
   // At this point in the codegen, the body block has been emitted
@@ -335,8 +352,14 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   // (a valid use of the induction variable) has not been emitted yet.
   /////////////////////////////////////////////////////////////////
 
-  ReplaceAllUsesInCurrentBlock(InductionDetachMap);
+  // Test whether we can iterate over all successor blocks
+  //for (llvm::BasicBlock *BBSuccessor : successors(ForBody)){
+  //  llvm::errs() << "Successor BB name: " << BBSuccessor->getName() << "\n";
+  //}    
+    
+  
 
+  // Reset the alloca insert point to where it was before the detach
   llvm::Instruction* ptr = AllocaInsertPt; 
   AllocaInsertPt = OldAllocaInsertPt; 
   ptr->eraseFromParent(); 
@@ -347,6 +370,8 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   EmitBlock(Increment);
 
   EmitStmt(S.getInc());
+
+
 
   BreakContinueStack.pop_back();
 
@@ -362,6 +387,10 @@ void CodeGenFunction::EmitCXXForallRangeStmt(const CXXForallRangeStmt &S,
   Builder.CreateSync(End, SRStart);
 
   EmitBlock(End, true);
+  
+  LO.CXXExceptions=1;
+  LO.Exceptions=1;
+ 
 }
 
 void CodeGenFunction::ReplaceAllUsesInCurrentBlock(llvm::ValueMap<llvm::Value*, llvm::AllocaInst *> &InductionDetachMap){
